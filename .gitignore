@@ -4,3 +4,7 @@
 .Ruserdata
 data
 .DS_Store
+.httr-oauth
+.html
+hciitextmining_files
+temp

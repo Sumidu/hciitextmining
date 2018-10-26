@@ -2,12 +2,263 @@
 title: "HCII Text-Mining"
 author: "André Calero Valdez"
 date: "10/16/2018"
-output: html_document
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    collapsed: false
+    df_print: paged
+    dev: png
+    self_contained: true
+    number_sections: true
+  pdf_document:
+    fig_caption: true
+    latex_engine: xelatex
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+Sys.setlocale("LC_ALL", 'en_US.UTF-8')
+knitr::asis_output("\U2500  \U2665  \U2666  \U2663")
+
+library(tidyverse)
+library(tidytext)
+library(pdftools)
+library(stopwords)
+library(purrr)
+library(topicmodels)
+
 ```
 
-## R Markdown
+# Introduction 
+
+## Loaded text-documents
+```{r load_files}
+
+directory_name <- "data"
+file_names <- dir(path = directory_name, pattern = ".pdf", 
+                  full.names = T, recursive = T)
+
+
+
+## This function gets the text from a given file name
+file2text <- function(filename) {
+rawtext <- pdf_text(filename)
+  text <- glue::glue_collapse(rawtext)
+  text <- str_replace_all(text, "\\n", " ") %>% 
+            str_to_lower() %>% 
+            str_remove_all("([0-9]*)")
+  text
+  }
+
+file2name <- function(filename) {
+  year <- str_extract(filename, "([0-9]+)")
+  paper <- str_extract(filename, "[A-Z]+([a-z]+)")
+  paste0(paper, year)
+  
+}
+
+file2Year <- function(filename) {
+  year <- str_extract(filename, "([0-9]+)")
+  year <- as.numeric(year)
+  year
+}
+
+
+
+text_list <- map_chr(file_names, file2text) 
+paper_list <- map_chr(file_names, file2name)
+year_list <- map_dbl(file_names, file2Year)
+text_df <- tibble(text=text_list,  
+                  paper=paper_list, year=year_list, filename=file_names) 
+ 
+head(text_df, 3)
+```
+
+
+## Tokenization
+After loading all files into a dataframe, which contains both a `paper` and a `year` field we can start the tokenization process.
+
+```{r start-analysis}
+    
+tokenized_df <- text_df %>%
+  unnest_tokens(word, text) 
+
+book_words_by_year <- text_df %>%
+  unnest_tokens(word, text) %>% 
+  group_by(year) %>% 
+  count(paper, word, sort = TRUE) %>%
+  ungroup()  
+
+book_words <- text_df %>%
+  unnest_tokens(word, text) %>% 
+  count(paper, word, sort = TRUE) %>%
+  ungroup()
+
+```
+## Collect Stopwords
+
+```{r stopwords}
+
+# Get a list of stopwords
+mystopwords <- tibble(word=stopwords()) %>% 
+  bind_rows(tibble(word= c("n", "s", "n", "t", "d", "e"))) 
+
+
+book_words_cln <- book_words %>% anti_join(mystopwords) 
+book_words_by_year_cln <- book_words_by_year %>% anti_join(mystopwords) 
+
+
+```
+
+# Topic mining
+Firt we prepare our data for latent-dirichlet allocation, by transforming the data from tidy to DTM (document-term-matrix) format.
+
+```{r LDA-prep}
+
+k_parameter <- 3
+r_seed <- 123
+
+book_words_cln %>%  cast_dtm(paper, word, n) -> book_dtm
+book_words_by_year_cln %>% cast_dtm(year, word, n) -> year_dtm
+
+book_lda <- LDA(book_dtm, k=k_parameter, control = list(seed=r_seed))
+year_lda <- LDA(year_dtm, k=k_parameter, control = list(seed=r_seed))
+
+```
+
+## LDA 
+Next we convert the lda_data back to tidy format for analysis with ggplot
+
+```{r LDA2Tidy}
+
+book_tidy_lda <- tidy(book_lda, matrix="beta")
+
+ap_top_terms <- book_tidy_lda %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+ap_top_terms %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip()
+
+
+
+beta_spread <- book_tidy_lda %>%
+  mutate(topic = paste0("topic", topic)) %>%
+  spread(topic, beta) %>%
+  filter(topic1 > .001 | topic2 > .001) %>%
+  mutate(log_ratio = log2(topic2 / topic1))
+
+beta_spread
+```
+
+```{r next}
+
+#words per 
+book_words <- text_df %>%
+  unnest_tokens(word, text) %>% 
+  count(paper, word, sort = TRUE) %>%
+  ungroup()  
+
+total_words <- book_words %>% 
+  group_by(paper) %>% 
+  summarize(total = sum(n))
+
+book_words <- left_join(book_words, total_words)
+
+book_words %>% filter(paper == "Wetzlinger2014")
+
+ggplot(book_words, aes(n/total, fill = paper)) +
+  geom_histogram(show.legend = FALSE) +
+  xlim(NA, 0.0009) +
+  facet_wrap(~paper, ncol = 2, scales = "free_y")
+
+freq_by_rank <- book_words %>% 
+  group_by(paper) %>% 
+  mutate(rank = row_number(), 
+         `term frequency` = n/total)
+
+freq_by_rank %>% 
+  ggplot(aes(rank, `term frequency`, color = paper)) + 
+  geom_line(size = 1.1, alpha = 0.8, show.legend = FALSE) + 
+  scale_x_log10() +
+  scale_y_log10()
+
+rank_subset <- freq_by_rank %>% 
+  filter(rank < 500,
+         rank > 10)
+
+lm(log10(`term frequency`) ~ log10(rank), data = rank_subset) # slope should be -1
+
+freq_by_rank %>% 
+  ggplot(aes(rank, `term frequency`, color = paper)) + 
+  geom_abline(intercept = -0.8692, slope = -0.982, color = "gray50", linetype = 2) +
+  geom_line(size = 1.1, alpha = 0.8, show.legend = FALSE) + 
+  scale_x_log10() +
+  scale_y_log10()
+
+
+
+book_words <- book_words %>%
+  bind_tf_idf(word, paper, n)
+book_words
+
+
+book_words %>%
+  select(-total) %>%
+  arrange(desc(tf_idf))
+
+
+
+book_words %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+  group_by(paper) %>% 
+  top_n(15) %>% 
+  ungroup %>%
+  ggplot(aes(word, tf_idf, fill = paper)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~paper, ncol = 2, scales = "free") +
+  coord_flip()
+
+
+
+```
+
+## Remove stopwords
+List of removed stopwords was enriched manually by a set of natural speech stopwords, after manually scanning all utterences
+```{r stop_word_removal}
+en_manual_stopwords <- c(
+  "ja", "–")
+
+en_stopwords <- data_frame(word = stopwords::stopwords("en", source = "stopwords-iso")) %>% bind_rows(data_frame(word = en_manual_stopwords))
+
+token_reduced_df <- token_df %>% anti_join(en_stopwords, by = "word")
+```
+
+
+
+```{r word_frequencies_all}
+token_reduced_df %>%
+  count(filename, word, sort = TRUE) 
+
+token_reduced_df %>% 
+  count(filename, word, sort = TRUE) %>% arrange(-n) %>% 
+  head(n = 20) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n, fill=factor(filename))) +
+  geom_col(position = position_dodge()) +
+  xlab(NULL) +
+  coord_flip() + facet_wrap(~filename, scales = "free")
+```
+
 
