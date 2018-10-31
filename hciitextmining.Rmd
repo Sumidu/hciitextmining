@@ -40,35 +40,34 @@ alternate_palette <- function(palette){
   result
 }
 
-```
-
-# Introduction 
-
-## Loaded text-documents
-```{r load_files}
-
-directory_name <- "data"
-file_names <- dir(path = directory_name, pattern = ".pdf", 
-                  full.names = T, recursive = T)
-
-
-
 ## This function gets the text from a given file name
 file2text <- function(filename) {
 rawtext <- pdf_text(filename)
   text <- glue::glue_collapse(rawtext)
   text <- str_replace_all(text, "\\n", " ") %>% 
             str_to_lower() %>% 
-            str_remove_all("([0-9]*)")
-  text
-  }
+            str_remove_all("([0-9]*)") %>% 
+          str_replace_all("ﬀ", "ff") %>% 
+          iconv(from="latin1", to="ASCII", "")
 
-file2name <- function(filename) {
-  year <- str_extract(filename, "([0-9]+)")
-  paper <- str_extract(filename, "[A-Z]+([a-z]+)")
-  paste0(paper, year)
-  
+  text
 }
+
+
+## Function that extracts the paper name from AuthorYearTitle1:3
+file2name <- function(filename) {
+  filename <- filename %>%  iconv(from="latin1", to="ASCII", "")
+  year <- str_extract(filename, "([0-9]+)")
+  paper <- str_match_all(filename, "[0-9]+[ _]Chapter[ _](([A-Z]+[a-z]+)++)")
+  author <- str_match(filename, "\\/([A-z- ]*)(?:[0-9]{4})")[1,2]
+  paper <- unlist(as.vector(paper))
+  # Concatenate Author, year, and first three Words
+  paste0(author, year, paper[2])
+}
+
+# Debug Help (run file-getting from next chunk before)
+#filename <- file_names[1]
+#file2name(filename)
 
 file2Year <- function(filename) {
   year <- str_extract(filename, "([0-9]+)")
@@ -76,25 +75,64 @@ file2Year <- function(filename) {
   year
 }
 
+const_first_year <- 2007
+const_last_year <- 2017
+const_cache_filename <- "temp/converted_texts.rds"
+const_clean_start <- T
+
+if(const_clean_start) {
+  file.remove(const_cache_filename)
+}
+
+```
+
+# Introduction 
+
+## Loaded text-documents
+```{r load_files}
+
+# Ensure all data-frames are empty first
+text_df <- data.frame()
+text_df_cache <- data.frame()
+
+directory_name <- "data"
+file_names <- dir(path = directory_name, pattern = ".pdf", 
+                  full.names = T, recursive = T)
 
 
-text_list <- map_chr(file_names, file2text) 
-paper_list <- map_chr(file_names, file2name)
-year_list <- map_dbl(file_names, file2Year)
-text_df <- tibble(text=text_list,  
-                  paper=paper_list, year=year_list, filename=file_names) 
- 
-head(text_df, 3)
+# When a cache exists rewrite the file_names list with only missing files
+if(file.exists(const_cache_filename)){
+  text_df_cache <- readRDS(const_cache_filename)
+  missing_files <- file_names [!  file_names %in% text_df_cache$filename]
+  file_names <- missing_files
+} 
+
+# When still files need to be loaded, load them
+if(length(file_names) > 0){
+  text_list <- map_chr(file_names, file2text)
+  paper_list <- map_chr(file_names, file2name)
+  year_list <- map_dbl(file_names, file2Year)
+  text_df <- tibble(text = text_list, paper = paper_list,
+                    year = year_list, filename = file_names)
+  # cleanup
+  rm(text_list)
+  rm(paper_list)
+  rm(year_list)
+}
+# Merge Cache with new data
+text_df <- bind_rows(text_df_cache, text_df)
+
+saveRDS(text_df, const_cache_filename, compress = "gzip")
+rm(text_df_cache) 
+rm(directory_name)
+rm(file_names)
 ```
 
 
 ## Tokenization
 After loading all files into a dataframe, which contains both a `paper` and a `year` field we can start the tokenization process.
 
-```{r start-analysis}
-    
-tokenized_df <- text_df %>%
-  unnest_tokens(word, text) 
+```{r two-tokenizations}
 
 book_words_by_year <- text_df %>%
   unnest_tokens(word, text) %>% 
@@ -108,7 +146,7 @@ book_words <- text_df %>%
   count(paper, word, sort = TRUE) %>%
   ungroup()
 
-head(book_words)
+levels(factor(book_words$paper))
 
 ```
 ## Collect Stopwords
@@ -116,10 +154,11 @@ head(book_words)
 ```{r stopwords}
 
 # Get a list of stopwords
-mystopwords <- tibble(word=stopwords()) %>% 
+mystopwords <- tibble(word=stopwords("en", source = "stopwords-iso")) %>% 
   bind_rows(tibble(word= c("n", "s", "n", "t", "d", "e", 
-                           "can", "based", "j", "r", "p", "x", 
-                           "al", "et", "m", "pp", "fig", "also"))) 
+                           "can", "based", "j", "r", "p", "x", "y",
+                           "al", "et", "m", "pp", "fig", "also", "two", "different",
+                           "use", "used", "using", "one"))) 
 
 
 # Create data-frames for papers individually and by year
@@ -128,34 +167,219 @@ book_words_by_year_cln <- book_words_by_year %>% anti_join(mystopwords)
 
 ```
 
+## Analyze frequencies over time
 ```{r visualize-word-freq}
 
+const_topn <- 7
 #book_words_by_year_cln %>% bind_tf_idf(word, year, n)
 
 book_words_by_year_cln %>%  # Use the by year data frame
   group_by(year, word) %>%  # and for all words and years
-  summarize(n = sum(n)) %>%   # count the word frequencies from all documents
-  top_n(10, n) %>%            # get the top 10 words for each year
-  bind_tf_idf(word, year, n) %>%  # create a tf-idf (where tf is word freq. and idf is based- on year)
-  arrange(desc(tf_idf)) -> top_words # sort top words
+  summarize(n = sum(n)) -> all_words_by_year # count the word frequencies from all documents
 
-top_words$word <- factor(top_words$word) # turn words into factors for completion 
+all_words_by_year %>%     # get the top 10 words for each year
+  bind_tf_idf(word, year, n) %>%  # create a tf-idf 
+                                  #(where tf is word freq. and idf is based- on year)
+  arrange(desc(tf)) -> top_words # sort top words
+
+#filter out top words
+top_words %>% top_n(const_topn, tf) -> filter_top_words 
+
+# get top words from all data to complete the data set
+all_words_by_year %>% filter(word %in% filter_top_words$word) %>% 
+  bind_tf_idf(word,year,n)-> final_word_list
+
+# turn words into factors for completion 
+final_word_list$word <- factor(final_word_list$word) 
 # some words appear 0 times in some years, this requires to add 0s
 
-level_count <- length(levels(top_words$word)) # generate a palette containg sufficient colors
+level_count <- length(levels(final_word_list$word)) # generate a palette containg sufficient colors
 palette <- viridis_pal(option = "D")(level_count)  
 
+# create an alternating palette
 p2 <- alternate_palette(palette)
 
-top_words %>%   complete(word, year, fill = list( tf= 0)) %>% 
-  arrange(word) %>% 
-  ggplot(aes(fill=word, y=tf, x=year)) + geom_area(position="stack", color="black") +
-  scale_fill_manual(values = p2)
 
+# Save absolute figure ----
+final_word_list %>%   complete(word, year, fill = list(tf= 0.00, tf_idf=0)) %>% 
+  arrange((tf)) %>% 
+  mutate(word = factor(word, unique(word))) %>%  # Reorder ?
+  ggplot(aes(fill=word, y=n, x=year)) + geom_area(color="black") +
+ # scale_fill_manual(values = palette) +
+  labs (#title="Increasing importance of data for HCI research",
+        title="Absolute Frequency over time",
+        caption="",
+        x="year",
+        y="absolute term-frequency",
+        fill="Most frequent terms") +
+  scale_x_continuous(breaks = c(2007,2009,2011:2017)) +
+  #scale_y_continuous(labels=scales::percent) +
+  theme(legend.position = "none") +
+  NULL
+
+
+ggsave("output/topabs.png", width=5, height=7*0.681)
+
+```
+
+## Relative output
+
+```{r outputrelative}
+
+# Save Relative figure -----
+final_word_list %>%   complete(word, year, fill = list(tf= 0.00, tf_idf=0)) %>% 
+  arrange((tf)) %>% 
+  mutate(word = factor(word, unique(word))) %>%  # Reorder ?
+  ggplot(aes(fill=word, y=tf, x=year)) + geom_area(color="black") +
+ # scale_fill_manual(values = palette) +
+  labs (subtitle="Increasing importance of data for HCI research",
+        #subtitle="Relative Frequency over time",
+        caption="",
+        x="year",
+        y="relative term-frequency",
+        fill="Most frequent terms") +
+  scale_x_continuous(breaks = c(2007,2009,2011:2017)) +
+  scale_y_continuous(labels=scales::percent) +
+  NULL
+
+
+ggsave("output/toprel.png", width=7, height=7*0.681)
 
 
 
 ```
+
+
+## Predict frequencies over time
+
+```{r forcasting-by-loess}
+
+library(forecast)
+library(tidyquant)
+library(imputeTS)
+
+# get a complete dataset form the final_word_list
+final_word_list %>%   complete(word, year, fill = list(tf= 0.00, tf_idf=0)) %>% 
+  arrange((tf)) %>% 
+  mutate(word = factor(word, unique(word))) %>%
+  filter(word %in% c("game","data", "social", "design", "usability", "web")) %>% 
+  select(word, year, n) -> fc_data
+
+# forcasting data plot as scatter plus loess_curve
+fc_data %>% ggplot(aes(x = year, y = n, color = word)) +
+    geom_point() +
+    geom_smooth(method = "loess") + 
+    labs(title = "Word Frequency over time", x = "", 
+         y = "Word occurance") +
+    facet_wrap(~ word, ncol = 3, scale = "free_y") +
+    expand_limits(y = 0) + 
+    scale_color_tq() +
+    scale_x_continuous(breaks = c(2007,2009,2011,2013,2015,2017)) +
+    theme_tq() +
+    theme(legend.position="none")
+
+ggsave("output/loess.png", width=7, height=7*0.681)
+
+```
+
+## Forcast the trends of top terms using random walks with drift
+
+```{r foreast-plot}
+
+# Constants -----
+const_word_minimum_threshold <- 20 
+
+
+# Actual forcast plot ------------------
+
+
+# from all cleaned words count how often they appear per year
+book_words_by_year_cln %>% group_by(year, word) %>% 
+  summarise(n = sum(n)) -> words_summary
+
+# only select words that appear at leat <const_word_minimum_threshold> times
+words_summary %>% filter(n > const_word_minimum_threshold) -> words_summary
+
+#get a list of all words sorted in overall order
+words_summary %>% 
+  group_by(word) %>% 
+  summarize(n = sum(n)) %>% 
+  arrange(desc(n)) %>%  
+  select(word) %>% as_vector() -> terms_list
+
+# Run the predictions for all words
+param_print_figures <- F # save images?
+#generate empty data frame for succesive generation of forcasts
+predictions <- data.frame() 
+for(pred_word in head(terms_list, n=1000)){ 
+  # from the subset of words, get only the word we are currently interested in
+  # then select all its years and frequencies
+   words_summary %>% filter(word == pred_word) %>% 
+    select(year, n) -> word_freq 
+  
+  # find missing years in the data 
+  years <- const_first_year:const_last_year
+  missing_years <- years[ !years %in% word_freq$year ]
+  
+  # Only do missing value imputation if at least 4 values are available
+  available_years <- length(years) - length(missing_years)
+  
+  if(available_years > 3) {
+    # kalman filter the missing year as create a time-series
+    word_freq%>% 
+      bind_rows(data.frame(year=missing_years, n=c(NA))) %>% 
+      arrange(year) %>% ungroup() %>%  
+      select(n) %>% as_vector %>% 
+      na.kalman() %>%  
+      ts(frequency = 1, start=const_first_year)  -> fc_ts 
+    
+    
+    const_look_ahead = 2
+    # use a random-walk forst to estimate the next 8 years
+    fc_ts %>% 
+      rwf(drift=T, h = const_look_ahead) %>% 
+      as_tibble() %>% rownames_to_column(var = "year") %>% 
+      mutate(year=as.numeric(year)) %>% filter(year==const_last_year + const_look_ahead) %>% 
+      mutate(value = `Point Forecast`, 
+             ci_width = (`Hi 80` - `Lo 80`), 
+             ci_lo = `Lo 80`, 
+             ci_hi = `Hi 80`) %>% 
+      select(value, ci_width, ci_lo, ci_hi) %>% 
+      mutate(word=pred_word) -> row_pred
+    
+    # Add prediction to the list of predictions
+    predictions <- bind_rows(predictions, row_pred)
+    
+    if(param_print_figures){
+      autoplot(fc_ts) + autolayer(
+        rwf(fc_ts, drift = T, h = 3, level = 50),
+        series = "Drift", PI = T, showgap = F) +
+        ggtitle(paste("Forecasts for term", pred_word)) +
+        xlab("Year") + ylab("Frequency") +
+        expand_limits(y = c(0)) +
+        scale_x_continuous(breaks = c(2007, 2011, 2015, 2019)) +
+        guides(colour = guide_legend(title = "Forecast"))
+      
+      ggsave(paste0("output/",pred_word,".png"), width=3, height=3)
+    }
+  }
+}
+
+
+predictions %>% arrange(desc(value)) %>% head(40) %>% 
+  mutate(word = factor(word, rev(unique(word)))) %>% 
+  ggplot(aes(x=word, y= value, ymin = value - (ci_width / 2), ymax = value + (ci_width / 2))) + 
+  geom_point() +
+  geom_errorbar() +
+  coord_flip() +
+  NULL
+
+predictions %>% arrange(desc(value)) %>% head(40)
+
+```
+
+
+
 
 # Topic mining
 Firt we prepare our data for latent-dirichlet allocation, by transforming the data from tidy to DTM (document-term-matrix) format.
@@ -259,7 +483,7 @@ freq_by_rank %>%
                          caption="Dashed line refers to the linear model of parameters")
 
 
-ggsave("zipf.png", width=7, height=7*0.681)
+ggsave("output/zipf.png", width=7, height=7*0.681)
 
 ```
 
@@ -319,5 +543,8 @@ citation("topicmodels")
 citation("rmarkdown")
 citation("SnowballC")
 
+citation("forecast")
+citation("imputeTS")
+citation("tidyquant")
 ```
 
