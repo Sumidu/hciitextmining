@@ -22,6 +22,7 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 Sys.setlocale("LC_ALL", 'en_US.UTF-8')
 knitr::asis_output("\U2500  \U2665  \U2666  \U2663")
+lemmatization_url <- "https://raw.githubusercontent.com/michmech/lemmatization-lists/master/lemmatization-en.txt"
 
 library(tidyverse)
 library(tidytext)
@@ -47,7 +48,14 @@ rawtext <- pdf_text(filename)
   text <- str_replace_all(text, "\\n", " ") %>% 
             str_to_lower() %>% 
             str_remove_all("([0-9]*)") %>% 
-          str_replace_all("ﬀ", "ff") %>% 
+          str_replace_all("ﬀ", "ff") %>%  #ligatures
+          str_replace_all("ﬁ", "fi") %>% 
+          str_replace_all("ﬂ", "fl") %>%
+          str_replace_all("ﬃ","ffi")%>%
+          str_replace_all("ﬄ", "ffl") %>%
+          str_replace_all("Ĳ", "IJ") %>%
+          str_replace_all("ĳ", "ij") %>%
+          str_replace_all("ﬆ", "st") %>%
           iconv(from="latin1", to="ASCII", "")
 
   text
@@ -78,7 +86,7 @@ file2Year <- function(filename) {
 const_first_year <- 2007
 const_last_year <- 2017
 const_cache_filename <- "temp/converted_texts.rds"
-const_clean_start <- T
+const_clean_start <- F
 
 if(const_clean_start) {
   file.remove(const_cache_filename)
@@ -95,9 +103,10 @@ if(const_clean_start) {
 text_df <- data.frame()
 text_df_cache <- data.frame()
 
-directory_name <- "data"
-file_names <- dir(path = directory_name, pattern = ".pdf", 
-                  full.names = T, recursive = T)
+#directory_name <- "/Volumes/Documents/#users/ACaleroValdez/hciiscrape"
+#directory_name <- "data"
+#file_names <- dir(path = directory_name, pattern = ".pdf", full.names = T, recursive = T)
+file_names <- c()
 
 
 # When a cache exists rewrite the file_names list with only missing files
@@ -107,22 +116,37 @@ if(file.exists(const_cache_filename)){
   file_names <- missing_files
 } 
 
-# When still files need to be loaded, load them
-if(length(file_names) > 0){
-  text_list <- map_chr(file_names, file2text)
-  paper_list <- map_chr(file_names, file2name)
-  year_list <- map_dbl(file_names, file2Year)
-  text_df <- tibble(text = text_list, paper = paper_list,
-                    year = year_list, filename = file_names)
-  # cleanup
-  rm(text_list)
-  rm(paper_list)
-  rm(year_list)
+text_df <- text_df_cache
+file_count <- length(file_names)
+if(file_count>0){
+  step_size <- 2
+  file_steps <- floor( file_count / step_size )
+  
+  for (i in 0:file_steps) {
+    start_index <- i*step_size
+    end_index <- (i+1)*step_size
+    files_selected <- file_names[start_index:end_index]
+    files_selected <- (files_selected)
+    # Debugging if fail
+    # print(files_selected)
+    {
+      text_list <- map_chr(files_selected, file2text)
+      paper_list <- map_chr(files_selected, file2name)
+      year_list <- map_dbl(files_selected, file2Year)
+      new_text_df <- tibble(text = text_list, paper = paper_list,
+                            year = year_list, filename = files_selected)
+    }
+    print(paste((i+1)*step_size, "files parsed. Start_i:", start_index, "End_i:", end_index ))
+    
+    # Merge Cache with new data
+    text_df <- bind_rows(text_df, new_text_df)
+    saveRDS(text_df, const_cache_filename, compress = "gzip")
+  }
 }
-# Merge Cache with new data
-text_df <- bind_rows(text_df_cache, text_df)
-
-saveRDS(text_df, const_cache_filename, compress = "gzip")
+# cleanup
+rm(text_list)
+rm(paper_list)
+rm(year_list)
 rm(text_df_cache) 
 rm(directory_name)
 rm(file_names)
@@ -132,21 +156,22 @@ rm(file_names)
 ## Tokenization
 After loading all files into a dataframe, which contains both a `paper` and a `year` field we can start the tokenization process.
 
-```{r two-tokenizations}
+```{r two-tokenizations, cache=T}
 
 book_words_by_year <- text_df %>%
   unnest_tokens(word, text) %>% 
   mutate(stem = wordStem(word, language = "english")) %>% 
   group_by(year) %>% 
-  count(paper, word, sort = TRUE) %>%
+  count(paper, stem, sort = TRUE) %>%
   ungroup()  
 
 book_words <- text_df %>%
   unnest_tokens(word, text) %>% 
-  count(paper, word, sort = TRUE) %>%
+  mutate(stem = wordStem(word, language = "english")) %>% 
+  count(paper, stem, sort = TRUE) %>%
   ungroup()
 
-levels(factor(book_words$paper))
+# levels(factor(book_words$paper))
 
 ```
 ## Collect Stopwords
@@ -158,12 +183,12 @@ mystopwords <- tibble(word=stopwords("en", source = "stopwords-iso")) %>%
   bind_rows(tibble(word= c("n", "s", "n", "t", "d", "e", 
                            "can", "based", "j", "r", "p", "x", "y",
                            "al", "et", "m", "pp", "fig", "also", "two", "different",
-                           "use", "used", "using", "one"))) 
+                           "use", "used", "using", "one", "e.g"))) 
 
 
 # Create data-frames for papers individually and by year
-book_words_cln <- book_words %>% anti_join(mystopwords) 
-book_words_by_year_cln <- book_words_by_year %>% anti_join(mystopwords) 
+book_words_cln <- book_words %>% rename(word = stem) %>% anti_join(mystopwords) 
+book_words_by_year_cln <- book_words_by_year %>% rename(word = stem) %>% anti_join(mystopwords) 
 
 ```
 
@@ -171,7 +196,7 @@ book_words_by_year_cln <- book_words_by_year %>% anti_join(mystopwords)
 ```{r visualize-word-freq}
 
 const_topn <- 7
-#book_words_by_year_cln %>% bind_tf_idf(word, year, n)
+book_words_by_year_cln %>% bind_tf_idf(word, paper, n) -> book_words_tfidf
 
 book_words_by_year_cln %>%  # Use the by year data frame
   group_by(year, word) %>%  # and for all words and years
@@ -181,6 +206,9 @@ all_words_by_year %>%     # get the top 10 words for each year
   bind_tf_idf(word, year, n) %>%  # create a tf-idf 
                                   #(where tf is word freq. and idf is based- on year)
   arrange(desc(tf)) -> top_words # sort top words
+
+book_words_tfidf %>% arrange(desc(tf_idf))
+
 
 #filter out top words
 top_words %>% top_n(const_topn, tf) -> filter_top_words 
@@ -214,7 +242,7 @@ final_word_list %>%   complete(word, year, fill = list(tf= 0.00, tf_idf=0)) %>%
         fill="Most frequent terms") +
   scale_x_continuous(breaks = c(2007,2009,2011:2017)) +
   #scale_y_continuous(labels=scales::percent) +
-  theme(legend.position = "none") +
+  #theme(legend.position = "none") +
   NULL
 
 
@@ -262,7 +290,7 @@ library(imputeTS)
 final_word_list %>%   complete(word, year, fill = list(tf= 0.00, tf_idf=0)) %>% 
   arrange((tf)) %>% 
   mutate(word = factor(word, unique(word))) %>%
-  filter(word %in% c("game","data", "social", "design", "usability", "web")) %>% 
+  filter(word %in% c("gam","data", "inform", "design", "user", "web")) %>% 
   select(word, year, n) -> fc_data
 
 # forcasting data plot as scatter plus loess_curve
@@ -287,7 +315,7 @@ ggsave("output/loess.png", width=7, height=7*0.681)
 ```{r foreast-plot}
 
 # Constants -----
-const_word_minimum_threshold <- 20 
+const_word_minimum_threshold <- 4000 
 
 
 # Actual forcast plot ------------------
@@ -308,15 +336,20 @@ words_summary %>%
   select(word) %>% as_vector() -> terms_list
 
 # Run the predictions for all words
-param_print_figures <- F # save images?
+param_print_figures <- T # save images?
 #generate empty data frame for succesive generation of forcasts
 predictions <- data.frame() 
+
+#debug 
+#pred_word <- "design"
+
 for(pred_word in head(terms_list, n=1000)){ 
   # from the subset of words, get only the word we are currently interested in
   # then select all its years and frequencies
    words_summary %>% filter(word == pred_word) %>% 
     select(year, n) -> word_freq 
   
+  print(pred_word)
   # find missing years in the data 
   years <- const_first_year:const_last_year
   missing_years <- years[ !years %in% word_freq$year ]
@@ -330,21 +363,23 @@ for(pred_word in head(terms_list, n=1000)){
       bind_rows(data.frame(year=missing_years, n=c(NA))) %>% 
       arrange(year) %>% ungroup() %>%  
       select(n) %>% as_vector %>% 
-      na.kalman() %>%  
+      imputeTS::na.kalman() %>%  
       ts(frequency = 1, start=const_first_year)  -> fc_ts 
     
+    diff <- as.numeric(fc_ts[length(fc_ts)] - fc_ts[9])
     
     const_look_ahead = 2
     # use a random-walk forst to estimate the next 8 years
     fc_ts %>% 
-      rwf(drift=T, h = const_look_ahead) %>% 
-      as_tibble() %>% rownames_to_column(var = "year") %>% 
+      forecast::rwf(drift=T, h = const_look_ahead) %>% as.data.frame() %>% 
+      rownames_to_column(var = "year") %>% 
       mutate(year=as.numeric(year)) %>% filter(year==const_last_year + const_look_ahead) %>% 
       mutate(value = `Point Forecast`, 
              ci_width = (`Hi 80` - `Lo 80`), 
              ci_lo = `Lo 80`, 
-             ci_hi = `Hi 80`) %>% 
-      select(value, ci_width, ci_lo, ci_hi) %>% 
+             ci_hi = `Hi 80`,
+             change = diff) %>% 
+      select(value, ci_width, ci_lo, ci_hi, change) %>% 
       mutate(word=pred_word) -> row_pred
     
     # Add prediction to the list of predictions
@@ -352,7 +387,7 @@ for(pred_word in head(terms_list, n=1000)){
     
     if(param_print_figures){
       autoplot(fc_ts) + autolayer(
-        rwf(fc_ts, drift = T, h = 3, level = 50),
+        forecast::rwf(fc_ts, drift = T, h = 3, level = 50),
         series = "Drift", PI = T, showgap = F) +
         ggtitle(paste("Forecasts for term", pred_word)) +
         xlab("Year") + ylab("Frequency") +
@@ -374,8 +409,17 @@ predictions %>% arrange(desc(value)) %>% head(40) %>%
   coord_flip() +
   NULL
 
-predictions %>% arrange(desc(value)) %>% head(40)
+predictions %>% arrange(desc(change)) %>% head(40) %>% 
+  mutate(word = factor(word, rev(unique(word)))) %>% 
+  ggplot(aes(x=word, y= change, ymin = value - (ci_width / 2), ymax = value + (ci_width / 2))) + 
+  geom_point() +
+  geom_errorbar() +
+  coord_flip() +
+  NULL
 
+predictions %>% arrange(desc(value)) %>% head(40)
+predictions %>% arrange(desc(change)) %>% head(100)
+predictions %>% arrange(change) %>% head(100)
 ```
 
 
@@ -386,27 +430,70 @@ Firt we prepare our data for latent-dirichlet allocation, by transforming the da
 
 ```{r LDA-prep}
 
-k_parameter <- 3
-r_seed <- 123
+parallel::detectCores() -> cores_count
+r_seed <- 77
+words_used <- 100
 
-book_words_cln %>%  cast_dtm(paper, word, n) -> book_dtm
-book_words_by_year_cln %>% cast_dtm(year, word, n) -> year_dtm
+book_words_cln %>%  arrange(desc(n)) %>% head(words_used) %>% cast_dtm(paper, word, n) -> book_dtm
+book_words_by_year_cln %>%  arrange(desc(n)) %>% head(words_used) %>% cast_dtm(year, word, n) -> year_dtm
 
+book_words_by_year_cln %>% filter(year==2017) %>% arrange(desc(n)) %>% head(words_used) %>% cast_dtm(paper, word, n) -> dtm_2017
+
+
+dtm_choice <- dtm_2017
+if(F){
+library(ldatuning)
+result <- FindTopicsNumber(
+  dtm_choice,
+  topics = seq(from = 40, to = 100, by = 10),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = r_seed, verbose=20),
+  mc.cores = cores_count,
+  verbose = TRUE
+)
+
+FindTopicsNumber_plot(result)
+}
+
+k_parameter <- 70
+lda_result <- LDA(dtm_choice, k = k_parameter, control = list(seed=r_seed))
 book_lda <- LDA(book_dtm, k=k_parameter, control = list(seed=r_seed))
 year_lda <- LDA(year_dtm, k=k_parameter, control = list(seed=r_seed))
 
+
+
+#posterior(book_lda)
+```
+```{r}
+library(text2vec)
+
+tokens = book_words_cln %>% 
+  tolower %>% 
+  word_tokenizer
+it = itoken(tokens, ids = movie_review$id[1:4000], progressbar = FALSE)
+v = create_vocabulary(it) %>% 
+  prune_vocabulary(term_count_min = 10, doc_proportion_max = 0.2)
+vectorizer = vocab_vectorizer(v)
+dtm = create_dtm(it, vectorizer, type = "dgTMatrix")
+
+lda_model = LDA$new(n_topics = 10, doc_topic_prior = 0.1, topic_word_prior = 0.01)
+doc_topic_distr = 
+  lda_model$fit_transform(x = dtm, n_iter = 1000, 
+                          convergence_tol = 0.001, n_check_convergence = 25, 
+                          progressbar = FALSE)
 ```
 
 ## LDA 
 Next we convert the lda_data back to tidy format for analysis with ggplot
 
-```{r LDA2Tidy}
+```{r LDA2Tidy, fig.height=7}
 
 book_tidy_lda <- tidy(book_lda, matrix="beta")
 
 ap_top_terms <- book_tidy_lda %>%
   group_by(topic) %>%
-  top_n(10, beta) %>%
+  top_n(15, beta) %>%
   ungroup() %>%
   arrange(topic, -beta)
 
@@ -414,10 +501,10 @@ ap_top_terms %>%
   mutate(term = reorder(term, beta)) %>%
   ggplot(aes(term, beta, fill = factor(topic))) +
   geom_col(show.legend = FALSE) +
-  facet_wrap(~ topic, scales = "free") +
+  facet_wrap(~ topic, scales = "free", ncol = 5) +
   coord_flip()
 
-
+ggsave("test.pdf", width=10, height=25)
 
 beta_spread <- book_tidy_lda %>%
   mutate(topic = paste0("topic", topic)) %>%
